@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import webbrowser
 
 import customtkinter as ctk
 try:
@@ -21,6 +22,18 @@ CARD_SELECTED_BORDER = "#3b82f6"
 ACTION_BUTTON_FG = "#2563eb"
 ACTION_BUTTON_HOVER = "#3b82f6"
 ACTION_BUTTON_TEXT = "#eff6ff"
+EMPTY_TEXT_COLOR = "#64748b"
+LOADING_BAR_FG = "#1e293b"
+LOADING_BAR_PROGRESS = "#3b82f6"
+NOTICE_LINK = "#60a5fa"
+LOADING_MESSAGES = [
+    "열심히 찾고 있어요! 잠깐만요 🔍",
+    "파일들을 하나하나 살펴보는 중이에요 📂",
+    "거의 다 찾아가고 있어요! 조금만 기다려주세요 ✨",
+    "찾았다! 싶었는데... 조금 더 확인할게요 👀",
+    "마지막으로 한 번 더 훑어볼게요 🚀",
+    "짜잔~ 곧 결과가 나와요! 🎉",
+]
 
 
 def _truncate_text(text: str, limit: int = 42) -> str:
@@ -41,27 +54,71 @@ class ResultList(ctk.CTkScrollableFrame):
         self._hovered_paths: set[str] = set()
         self._empty_label = ctk.CTkLabel(
             self,
-            text="결과가 여기에 표시됩니다.",
+            text="",
             anchor="w",
             justify="left",
-            text_color="#64748b",
+            text_color=EMPTY_TEXT_COLOR,
         )
-        self._empty_label.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        self._notice_frame = ctk.CTkFrame(
+            self,
+            corner_radius=16,
+            fg_color="#0f172a",
+            border_width=1,
+            border_color="#1e293b",
+        )
+        self._notice_label = ctk.CTkLabel(
+            self._notice_frame,
+            text="",
+            justify="center",
+            text_color="#e2e8f0",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        self._notice_label.grid(row=0, column=0, padx=20, pady=(16, 6))
+        self._notice_link = ctk.CTkButton(
+            self._notice_frame,
+            text="",
+            fg_color="transparent",
+            hover=False,
+            text_color=NOTICE_LINK,
+            font=ctk.CTkFont(size=14, underline=True),
+            command=self._open_notice_link,
+        )
+        self._notice_link.grid(row=1, column=0, padx=20, pady=(0, 14))
+        self._notice_link.grid_remove()
+        self._notice_frame.grid_columnconfigure(0, weight=1)
+        self._loading_frame = ctk.CTkFrame(
+            self,
+            corner_radius=18,
+            fg_color="#0f172a",
+            border_width=1,
+            border_color="#1e293b",
+        )
+        self._loading_label = ctk.CTkLabel(
+            self._loading_frame,
+            text="검색 중...",
+            text_color="#e2e8f0",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        )
+        self._loading_label.grid(row=0, column=0, padx=20, pady=(22, 10))
+        self._loading_bar = ctk.CTkProgressBar(
+            self._loading_frame,
+            mode="indeterminate",
+            progress_color=LOADING_BAR_PROGRESS,
+            fg_color=LOADING_BAR_FG,
+            height=10,
+            corner_radius=999,
+        )
+        self._loading_bar.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 22))
+        self._loading_frame.grid_columnconfigure(0, weight=1)
         self._rows: list[ctk.CTkFrame] = []
+        self._loading_message_index = 0
+        self._loading_after_id: str | None = None
+        self._notice_url: str | None = None
+        self.show_idle_state()
 
     def set_items(self, items: list[ResultItem]) -> None:
+        self._reset_content()
         self._items = items[:]
-        self._selected = {}
-        self._card_frames = {}
-        for row in self._rows:
-            row.destroy()
-        self._rows.clear()
-        self._empty_label.grid_forget()
-
-        if not items:
-            self._empty_label.configure(text="결과가 없습니다.")
-            self._empty_label.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
-            return
 
         for row_index, item in enumerate(items):
             extension = "폴더" if os.path.isdir(item.path) else (os.path.splitext(item.path)[1] or "-")
@@ -72,7 +129,7 @@ class ResultList(ctk.CTkScrollableFrame):
                 border_width=1,
                 border_color=CARD_BORDER,
             )
-            card.grid(row=row_index, column=0, sticky="ew", padx=2, pady=(0, 8))
+            card.grid(row=row_index + 1, column=0, sticky="ew", padx=2, pady=(0, 8))
             card.grid_columnconfigure(0, weight=1)
             card.grid_columnconfigure(1, weight=0)
 
@@ -177,6 +234,34 @@ class ResultList(ctk.CTkScrollableFrame):
 
             self._rows.append(card)
 
+    def show_idle_state(self) -> None:
+        self._reset_content()
+
+    def show_loading_state(self) -> None:
+        self._reset_content()
+        self._loading_message_index = 0
+        self._notice_label.configure(text=LOADING_MESSAGES[0])
+        self._notice_frame.grid(row=0, column=0, sticky="ew", padx=2, pady=(2, 10))
+        self._loading_frame.grid(row=1, column=0, sticky="ew", padx=2, pady=2)
+        self._loading_bar.start()
+        self._schedule_loading_message_rotation()
+
+    def show_empty_state(self, text: str = "검색 결과가 없습니다.") -> None:
+        self._reset_content()
+        self._empty_label.configure(text=text)
+        self._empty_label.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
+
+    def show_notice(self, text: str, url: str | None = None, link_text: str | None = None) -> None:
+        self._reset_content()
+        self._notice_url = url
+        self._notice_label.configure(text=text)
+        self._notice_frame.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
+        if url:
+            self._notice_link.configure(text=link_text or url)
+            self._notice_link.grid()
+        else:
+            self._notice_link.grid_remove()
+
     def get_selected_items(self) -> list[ResultItem]:
         return [item for item in self._items if self._selected.get(item.path) and self._selected[item.path].get()]
 
@@ -267,3 +352,36 @@ class ResultList(ctk.CTkScrollableFrame):
             self._apply_card_state(path)
         if self._on_selection_changed is not None:
             self._on_selection_changed(len(self.get_selected_items()))
+
+    def _reset_content(self) -> None:
+        self._items = []
+        self._selected = {}
+        self._card_frames = {}
+        self._hovered_paths.clear()
+        if self._loading_after_id is not None:
+            self.after_cancel(self._loading_after_id)
+            self._loading_after_id = None
+        for row in self._rows:
+            row.destroy()
+        self._rows.clear()
+        self._empty_label.grid_forget()
+        self._notice_frame.grid_forget()
+        self._notice_link.grid_remove()
+        self._notice_url = None
+        self._loading_bar.stop()
+        self._loading_frame.grid_forget()
+
+    def _schedule_loading_message_rotation(self) -> None:
+        if self._loading_after_id is not None:
+            self.after_cancel(self._loading_after_id)
+        self._loading_after_id = self.after(3000, self._rotate_loading_message)
+
+    def _rotate_loading_message(self) -> None:
+        self._loading_message_index = (self._loading_message_index + 1) % len(LOADING_MESSAGES)
+        self._notice_label.configure(text=LOADING_MESSAGES[self._loading_message_index])
+        self._schedule_loading_message_rotation()
+
+    def _open_notice_link(self) -> None:
+        if not self._notice_url:
+            return
+        webbrowser.open(self._notice_url)

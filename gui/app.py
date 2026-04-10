@@ -8,6 +8,7 @@ from typing import Any
 from gui.main_window import MainWindow
 from gui.startup import StartupContext, load_startup_context
 from gui.tray_controller import TrayController
+from core.search_engine import shutdown_search_manager
 
 
 class SplashScreen:
@@ -132,6 +133,7 @@ def main() -> None:
         finally:
             if tray is not None:
                 tray.stop()
+            shutdown_search_manager()
 
     splash.root.after(120, poll)
     splash.root.mainloop()

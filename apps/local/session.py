@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from core.models.search_types import Match
 
@@ -7,6 +8,7 @@ from core.models.search_types import Match
 class SessionState:
     last_matches: list[Match] = field(default_factory=list)
     history: list[str] = field(default_factory=list)
+    selected_roots: list[Path] = field(default_factory=list)
     hidden_mode: bool = False
 
     def remember_query(self, query: str) -> None:
@@ -15,3 +17,6 @@ class SessionState:
 
     def remember_matches(self, matches: list[Match]) -> None:
         self.last_matches = matches
+
+    def set_selected_roots(self, roots: list[Path]) -> None:
+        self.selected_roots = roots[:]

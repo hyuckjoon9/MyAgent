@@ -38,6 +38,7 @@ class SearchBar(ctk.CTkFrame):
 
     def focus_input(self) -> None:
         self.entry.focus_set()
+        self.entry.icursor("end")
 
     def get_query(self) -> str:
         return self.entry.get().strip()
