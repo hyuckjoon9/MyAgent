@@ -40,3 +40,6 @@ desktop.ini
 # Search engine binaries
 libs/Everything*.dll
 libs/Everything.exe
+libs/es/
+CONTEXT.md
+GUI_PHASE_PLAN.md
