@@ -3,6 +3,7 @@
 
 # Python
 __pycache__/
+.cache/
 *.py[cod]
 *.pyo
 *.pyd
@@ -11,6 +12,12 @@ __pycache__/
 dist/
 build/
 *.spec
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
 
 # PyInstaller 빌드 결과
 dist/
@@ -26,3 +33,10 @@ build/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Logs
+*.log
+
+# Search engine binaries
+libs/Everything*.dll
+libs/Everything.exe

@@ -1,122 +1,233 @@
-# MyAgent — 플로팅 캐릭터 어시스턴트 설계 (Plan B)
+# MyAgent Design
 
-## 파일 구조
+## 개요
 
-```
-MyAgent/
-├── assistant.py            # 기존 유지 (OpenAI 백엔드)
-├── local_assistant.py      # 기존 유지 (규칙 기반 백엔드)
-├── requirements.txt        # PyQt6 등 추가
-│
-├── gui/
-│   ├── __init__.py
-│   ├── main.py             # 앱 진입점
-│   ├── character_window.py # 플로팅 캐릭터 윈도우 (핵심)
-│   ├── bubble_window.py    # 말풍선 + 입력창 팝업
-│   ├── tray_icon.py        # 시스템 트레이 아이콘
-│   └── worker.py           # QThread 기반 AI 호출 워커
-│
-├── core/
-│   ├── __init__.py
-│   ├── backend.py          # assistant.py / local_assistant.py 통합 어댑터
-│   └── config.py           # 설정값 (위치, API 모드 등)
-│
-└── assets/
-    ├── idle.png
-    ├── thinking.png
-    ├── speaking.png
-    └── tray_icon.png
-```
+MyAgent는 자연어로 로컬 파일을 검색하고, 결과를 확인한 뒤 열기 또는 압축까지 이어서 수행할 수 있게 만든 Windows 데스크탑 앱이다.
 
----
+현재 기준의 기본 사용자 경험은 `CustomTkinter` 기반 메인 검색 창이며, 필요 시 CLI도 함께 제공한다.
 
-## 모듈별 역할
+## 해결하려는 문제
 
-### gui/main.py
-- `QApplication` 생성
-- `CharacterWindow`, `TrayIcon` 인스턴스화 및 시그널 연결
-- 환경 변수 검증 후 `app.exec()` 루프 진입
+Windows 기본 검색은 파일명 일부나 단순 속성 필터에는 강하지만, 다음과 같은 요청을 바로 처리하기 어렵다.
 
-### gui/character_window.py
-- `QWidget` 상속, 아래 플래그 조합:
-  ```python
-  Qt.WindowType.FramelessWindowHint
-  | Qt.WindowType.WindowStaysOnTopHint
-  | Qt.WindowType.Tool
-  ```
-- `WA_TranslucentBackground = True` (PNG 알파 채널 바탕화면으로 투과)
-- `set_state(state: CharacterState)` — idle/thinking/speaking PNG 교체
-- 드래그 이동: `mousePressEvent` / `mouseMoveEvent` 오버라이드
-- 클릭 판별: 이동 거리 5px 이하면 클릭으로 간주 → `BubbleWindow` 토글
-- 초기 위치: `QScreen.availableGeometry()` 기준 우하단
+- `최근에 수정한 pdf 보여줘`
+- `다운로드 폴더에서 zip 빼고 찾아줘`
+- `회의록 관련 엑셀 찾아줘`
+- `최근 파일 3개만 보여줘`
 
-### gui/bubble_window.py
-- `Qt.WindowType.Tool` 별도 윈도우 (캐릭터 윈도우와 분리)
-- `paintEvent` + `QPainterPath`로 둥근 말풍선 + 꼬리 삼각형 직접 드로잉
-- `QLabel` (응답 텍스트), `QLineEdit` (입력창), `QPushButton` (전송)
-- `show_thinking()` — 입력창 비활성화 + "생각 중..." 표시
-- `show_response(text)` — 응답 표시 + 입력창 재활성화
-- Escape 키 / 포커스 이탈 시 닫힘
+MyAgent는 이런 자연어 요청을 검색 의도와 후속 액션으로 분리해서 처리하고, 결과를 카드 UI로 보여줘 사용자가 빠르게 판단할 수 있게 하는 것을 목표로 한다.
 
-### gui/tray_icon.py
-- `QSystemTrayIcon` — 우클릭 메뉴: 보이기/숨기기, 종료
-- 더블클릭 → `CharacterWindow` 토글
+## 현재 제품 형태
 
-### gui/worker.py
-- `QThread` 상속 `AssistantWorker`
-- 시그널: `response_ready(str)`, `error_occurred(str)`, `thinking_started()`
-- `run()` 내부에서만 `core/backend.py` 호출 (UI 스레드 접근 금지)
-- 완료 시 `deleteLater()`
+### 기본 진입점
 
-### core/backend.py
-- `query(user_input: str) -> str` 단일 인터페이스
-- API 키 유무에 따라 OpenAI / 로컬 모드 자동 선택
-- 두 백엔드의 반환 타입 차이를 이 레이어에서 정규화
+- `python local_assistant.py`
+- 기본 실행은 GUI
+- `python local_assistant.py --cli` 로 CLI 실행 가능
 
-### core/config.py
-- `QSettings`로 창 위치, 백엔드 모드 저장/복원
+### 현재 GUI 구성
 
----
+- 시작 스플래시: `tkinter`
+- 메인 검색 창: `CustomTkinter`
+- 트레이 숨김/복귀: `pystray`
 
-## 인터랙션 흐름
+### 현재 사용자 흐름
 
-```
-사용자가 캐릭터 클릭
-    → BubbleWindow 팝업
-    → 텍스트 입력 후 엔터
-    → show_thinking() (UI 즉시 반응)
-    → AssistantWorker.start() (별도 스레드)
-        → core/backend.query() 실행
-        → response_ready.emit(text)
-    → show_response(text)
-    → CharacterState → SPEAKING
-```
+1. 앱 실행
+2. 검색 엔진 초기화
+3. 검색어 입력
+4. 결과 카드 목록 확인
+5. 카드 선택
+6. 열기 / 압축 / 경로 확인 / 폴더 열기
+7. 상태 메시지는 하단 토스트로 짧게 표시 후 자동 사라짐
 
----
+## UX 원칙
 
-## PyQt6 투명 윈도우 주의사항
+### 1. 검색과 액션을 분리한다
 
-- `setAttribute(WA_TranslucentBackground)` 호출은 `setWindowFlags()` 이후, `show()` 이전에 해야 함
-- `QLabel` 배경도 `setStyleSheet("background: transparent;")` 필요
-- 말풍선과 캐릭터는 별도 윈도우로 분리 — 같은 위젯에 넣으면 말풍선 표시 시 캐릭터 위치 흔들림
+- 검색은 결과를 보여주는 단계다.
+- 사용자가 선택하거나 후속 명령을 내릴 때 실제 액션이 실행된다.
+- 결과를 보기도 전에 파일을 여는 흐름은 최소화한다.
 
----
+### 2. 판단에 필요한 정보만 카드에 올린다
 
-## 구현 단계
+- 파일명
+- 수정 시각
+- 크기
+- 확장자 또는 폴더 여부
+- 필요할 때만 경로 펼침
 
-| Phase | 내용 | 완료 기준 |
-|-------|------|-----------|
-| **1** | 투명 프레임리스 윈도우 + PNG 표시 + 드래그 + 트레이 | 캐릭터가 바탕화면 위에 떠서 드래그 이동됨 |
-| **2** | 말풍선 팝업 + 로컬 백엔드 연결 + QThread | API 없이 파일 검색 결과가 말풍선에 표시됨 |
-| **3** | OpenAI 백엔드 + 캐릭터 상태 전환 + 위치 저장 | 호출 중 thinking PNG, 완료 후 speaking PNG |
-| **4** | 말풍선 UI 개선 + 글로벌 핫키 + pyinstaller 패키징 | 단일 .exe 실행 가능 |
+경로는 기본적으로 감추고, `경로 보기`를 눌렀을 때만 카드 내부에 표시한다.
 
----
+### 3. 한 화면에서 끝낸다
 
-## 추가 의존성
+- 검색창, 액션 버튼, 결과 리스트를 하나의 메인 윈도우 안에 둔다.
+- 검색 엔진 정보는 별도 카드 대신 제목 옆 작은 텍스트로만 표시한다.
+- 상태 메시지는 고정 영역이 아니라 토스트 오버레이로 처리해 결과 공간을 최대한 유지한다.
 
-| 패키지 | 용도 |
-|--------|------|
-| `PyQt6` | GUI 전체 |
-| `python-dotenv` | .env 환경 변수 로드 |
-| `keyboard` (Phase 4) | 글로벌 핫키 |
+### 4. 선택 마찰을 줄인다
+
+- 체크박스 선택 지원
+- 카드 본문 클릭 선택 지원
+- 선택 개수 즉시 표시
+- 선택된 카드는 배경과 보더 색으로 분명하게 구분
+
+### 5. 시스템 상태는 조용하게 보여준다
+
+- 엔진 상태는 제목 옆에 짧게만 표기
+- 액션 결과는 토스트로 짧게 알림
+- 앱 종료 대신 트레이 숨김을 기본 동작으로 둔다
+
+## 시각 설계 기준
+
+### 테마
+
+- 전체 테마는 CustomTkinter dark appearance 기준
+- 배경은 짙은 남색/슬레이트 계열
+- 주요 액션은 파란색 버튼으로 통일
+- 카드 배경은 메인 배경보다 약간 밝은 톤 사용
+
+### 주요 색상 의도
+
+- 앱 배경: 깊은 다크 톤
+- 카드 기본: 다크 카드 톤
+- 카드 hover: 기본보다 약간 밝은 톤
+- 카드 선택: hover보다 더 강한 파란 계열 강조
+- 주요 버튼: 동일한 파란색 계열
+- 비활성 버튼: 회색 계열
+- 보조 텍스트: 저채도 회색
+
+### 인터랙션
+
+- 카드 hover 시 배경이 밝아져 클릭 가능 영역임을 전달
+- 선택 시 보더와 배경이 함께 바뀌어 상태가 명확해야 함
+- 토스트는 나타났다가 3초 후 사라져야 함
+- 경로 펼침은 카드 내부에서만 이루어져야 함
+
+## 정보 구조
+
+### 헤더
+
+- 앱 제목
+- 현재 검색 엔진 표시
+- 검색 입력창
+
+### 액션 바
+
+- 열기
+- 압축
+- 새로고침
+- 경로 보기
+- 현재 선택 개수
+
+### 결과 영역
+
+- 스크롤 가능한 카드 리스트
+- 각 카드에는 파일명, 메타 정보, 선택 체크박스, 경로 관련 액션 포함
+
+### 토스트
+
+- 검색 결과 수
+- 파일 열기/압축 완료
+- 경로 복사 완료
+- 오류 또는 설정 문제
+
+## 검색 엔진 설계
+
+현재 검색 엔진은 `SearchManager`가 관리한다.
+
+### 동작 방식
+
+- 기본 모드는 `auto`
+- Everything 사용 가능 시 Everything 우선
+- Everything 사용 불가 또는 오류 시 native 검색으로 자동 fallback
+- `ASSISTANT_SEARCH_MODE` 로 `auto`, `everything`, `native` 지정 가능
+
+### 사용자 관점 원칙
+
+- 빠른 엔진이 가능하면 자동 사용
+- 실패해도 앱이 멈추지 않고 계속 검색 가능해야 함
+- 엔진 정보는 과하게 노출하지 않되 현재 상태는 확인 가능해야 함
+
+## 핵심 모듈 구조
+
+### 진입점
+
+- `local_assistant.py`
+  - GUI / CLI 실행 분기
+
+### GUI
+
+- `gui/app.py`
+  - 스플래시 표시
+  - 초기화 스레드
+  - 메인 윈도우 생성
+- `gui/main_window.py`
+  - 메인 레이아웃
+  - 검색 요청 / 액션 요청 / 토스트 / 상태 관리
+- `gui/widgets/search_bar.py`
+  - 검색 입력창과 검색 버튼
+- `gui/widgets/result_list.py`
+  - 결과 카드 렌더링
+  - 카드 선택 / hover / 경로 펼침 / 복사 / 폴더 열기
+- `gui/tray_controller.py`
+  - 시스템 트레이 제어
+- `gui/startup.py`
+  - 엔진 이름과 초기 notice 수집
+
+### 검색/액션
+
+- `core/query_parser.py`
+  - 자연어를 검색 의도로 파싱
+- `core/search_engine.py`
+  - 검색 엔진 선택과 fallback 관리
+- `core/services/query_service.py`
+  - 검색 실행과 결과 뷰모델 변환
+- `core/services/action_service.py`
+  - 열기 / 압축 / 인덱스 갱신 / 루트 조회
+
+### 검색 어댑터
+
+- `core/adapters/everything_adapter.py`
+- `core/adapters/native_adapter.py`
+- `core/utils/everything_helper.py`
+
+## 현재 설계상 강점
+
+- 검색 엔진 fallback이 있어 환경 차이에 덜 취약함
+- GUI와 검색/액션 로직이 서비스 계층으로 분리돼 있음
+- 결과 카드를 중심으로 사용 흐름이 단순함
+- 트레이 숨김으로 백그라운드 사용 시나리오에 대응함
+
+## 현재 설계상 제약
+
+- 결과 카드의 밀도가 높아지면 긴 경로와 버튼 배치가 복잡해질 수 있음
+- 고급 정렬/필터 재적용 UI는 아직 별도 제공하지 않음
+- Everything 미설치 환경에서는 native 검색 성능이 루트 크기에 영향을 받음
+- 현재 README 수준 이상의 배포 안내나 스크린샷 기반 문서는 없음
+
+## 향후 개선 방향
+
+### 1. 결과 정제 UX
+
+- 정렬 기준 전환
+- 파일만 / 폴더만 토글
+- 확장자 빠른 필터
+
+### 2. 카드 액션 고도화
+
+- 더 직관적인 아이콘 체계
+- 선택 상태 배치 최적화
+- 긴 파일명/긴 경로 대응 개선
+
+### 3. 상태 피드백 개선
+
+- 긴 작업의 진행 상태 표시
+- 오류 메시지 톤과 문구 정리
+- 토스트 유형별 스타일 차등
+
+### 4. 배포 문서 강화
+
+- 스크린샷 추가
+- `.env.example` 기반 빠른 시작 가이드 보강
+- Everything 설치/미설치 시나리오 분리 안내
