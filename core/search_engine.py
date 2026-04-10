@@ -2,21 +2,39 @@ from __future__ import annotations
 
 import os
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from core.adapters.everything_adapter import EverythingAdapter
+from core.adapters.es_adapter import EsAdapter
 from core.adapters.native_adapter import MAX_RESULT_LIMIT, NativeAdapter
+from core.adapters.windows_search_adapter import WindowsSearchAdapter
 from core.interfaces.search_adapter import SearchAdapter
 from core.models.search_types import Match
 from core.query_parser import QueryIntent, parse_query
-from core.utils.everything_helper import EVERYTHING_INSTALL_URL
+from core.utils.everything_helper import (
+    EVERYTHING_INSTALL_URL,
+    ensure_everything_runtime,
+    terminate_everything_process,
+)
 
 
 AUTO_OPEN_MARGIN = 1.2
 AUTO_OPEN_SCORE = 4.2
 RESULT_LIMIT = 10
 RISKY_EXTENSIONS = {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi"}
+EVERYTHING_MISSING_MESSAGE = (
+    "Everything이 설치되어 있지 않습니다.\n"
+    "아래 링크에서 설치 후 프로그램을 다시 시작해주세요.\n"
+    f"{EVERYTHING_INSTALL_URL}"
+)
+
+
+@dataclass
+class SearchAvailability:
+    search_enabled: bool
+    guidance_message: str | None = None
+    guidance_url: str | None = None
 
 
 class SearchManager:
@@ -24,74 +42,122 @@ class SearchManager:
         self.mode = os.getenv("ASSISTANT_SEARCH_MODE", "auto").strip().lower() or "auto"
         self.everything_auto_start = os.getenv("EVERYTHING_AUTO_START", "true").strip().lower() not in {"0", "false", "no"}
         self.notice_messages: list[str] = []
+        self._availability = SearchAvailability(search_enabled=True)
+        self._spawned_everything_pid: int | None = None
         self.adapter: SearchAdapter = self._select_adapter()
 
-    def _build_fallback_notice(self, detail: str = "") -> list[str]:
-        messages = [
-            "Assistant> 초고속 검색 엔진을 찾을 수 없어 기본 모드로 전환합니다.",
-            f"Assistant> Everything 설치: {EVERYTHING_INSTALL_URL}",
+    def _build_everything_install_notice(self) -> list[str]:
+        return [
+            "Assistant> Everything 설치를 찾지 못했습니다.",
+            f"Assistant> 설치 링크: {EVERYTHING_INSTALL_URL}",
         ]
+
+    def _build_native_notice(self, detail: str = "") -> list[str]:
+        messages = ["Assistant> Everything 연결에 실패해 로컬 인덱스 엔진으로 전환합니다."]
         if detail:
             messages.append(f"Assistant> 상세: {detail}")
         return messages
 
-    def _use_native(self, detail: str = "") -> SearchAdapter:
-        self.notice_messages.extend(self._build_fallback_notice(detail))
-        return NativeAdapter()
+    def _build_windows_notice(self, detail: str = "") -> list[str]:
+        messages = ["Assistant> Everything 연결에 실패해 Windows Search 엔진으로 전환합니다."]
+        if detail:
+            messages.append(f"Assistant> 상세: {detail}")
+        return messages
 
     def _select_adapter(self) -> SearchAdapter:
-        if self.mode == "native":
-            self.notice_messages.append("Assistant> 검색 엔진 모드: native 강제 모드로 실행합니다.")
+        runtime_info = ensure_everything_runtime(auto_start=self.everything_auto_start)
+        if not runtime_info.installed:
+            self._availability = SearchAvailability(
+                search_enabled=False,
+                guidance_message=EVERYTHING_MISSING_MESSAGE,
+                guidance_url=EVERYTHING_INSTALL_URL,
+            )
+            self.notice_messages.extend(self._build_everything_install_notice())
             return NativeAdapter()
 
+        self._availability = SearchAvailability(search_enabled=True)
+        if runtime_info.was_started:
+            self._spawned_everything_pid = runtime_info.spawn_pid
+
         try:
-            adapter = EverythingAdapter(auto_start=self.everything_auto_start)
-            if not adapter.runtime_info.is_running:
-                return self._use_native(adapter.runtime_info.status_message)
+            adapter = EsAdapter(auto_start=False, runtime_info=runtime_info)
             engine_message = "Assistant> 검색 엔진 모드: Everything"
-            if adapter.runtime_info.was_started:
+            if runtime_info.was_started:
                 engine_message += " (자동 실행됨)"
             self.notice_messages.append(engine_message)
             return adapter
         except Exception as exc:
-            if self.mode == "everything":
-                self.notice_messages.append("Assistant> 검색 엔진 모드: everything 강제 요청이 있었지만 안정성을 위해 native로 전환합니다.")
-            return self._use_native(str(exc))
+            self.notice_messages.extend(self._build_windows_notice(str(exc)))
 
-    def _swap_to_native(self, detail: str) -> NativeAdapter:
-        native_adapter = NativeAdapter()
-        self.adapter = native_adapter
-        self.notice_messages.extend(self._build_fallback_notice(detail))
-        return native_adapter
+        try:
+            adapter = WindowsSearchAdapter()
+            return adapter
+        except Exception as exc:
+            self.notice_messages.extend(self._build_native_notice(str(exc)))
+            return NativeAdapter()
+
+    def _swap_to_fallback(self, detail: str) -> SearchAdapter:
+        try:
+            adapter = WindowsSearchAdapter()
+            self.adapter = adapter
+            self.notice_messages.extend(self._build_windows_notice(detail))
+            return adapter
+        except Exception as exc:
+            native_adapter = NativeAdapter()
+            self.adapter = native_adapter
+            joined = detail if not detail else f"{detail}; windows search: {exc}"
+            self.notice_messages.extend(self._build_native_notice(joined))
+            return native_adapter
 
     def get_and_clear_notices(self) -> list[str]:
         messages = self.notice_messages[:]
         self.notice_messages.clear()
         return messages
 
+    def get_availability(self) -> SearchAvailability:
+        return self._availability
+
     def search_intent(self, intent: QueryIntent, limit: int, refresh_index: bool = False) -> list[Match]:
+        if not self._availability.search_enabled:
+            raise RuntimeError("Everything이 설치되어 있지 않아 검색할 수 없습니다.")
+
         bounded_limit = max(1, min(limit, MAX_RESULT_LIMIT))
         try:
             if refresh_index:
                 self.adapter.rebuild_index()
-            if isinstance(self.adapter, NativeAdapter):
-                return self.adapter.search_intent(intent, bounded_limit, refresh_index=False)
-            if isinstance(self.adapter, EverythingAdapter):
+            if hasattr(self.adapter, "search_intent"):
+                if isinstance(self.adapter, NativeAdapter):
+                    return self.adapter.search_intent(intent, bounded_limit, refresh_index=False)
                 return self.adapter.search_intent(intent, bounded_limit)
             return self.adapter.search(intent.raw, bounded_limit)
         except Exception as exc:
-            if isinstance(self.adapter, EverythingAdapter):
-                native_adapter = self._swap_to_native(str(exc))
+            if isinstance(self.adapter, (EsAdapter, WindowsSearchAdapter)):
+                fallback_adapter = self._swap_to_fallback(str(exc))
                 if refresh_index:
-                    native_adapter.rebuild_index()
-                return native_adapter.search_intent(intent, bounded_limit, refresh_index=False)
+                    fallback_adapter.rebuild_index()
+                if isinstance(fallback_adapter, NativeAdapter):
+                    return fallback_adapter.search_intent(intent, bounded_limit, refresh_index=False)
+                return fallback_adapter.search_intent(intent, bounded_limit)  # type: ignore[attr-defined]
             raise
 
     def rebuild_index(self) -> int:
         return self.adapter.rebuild_index()
 
     def engine_name(self) -> str:
-        return self.adapter.engine_name
+        if not self._availability.search_enabled:
+            return "Everything 미설치"
+        display_name = getattr(self.adapter, "display_name", None)
+        if display_name:
+            return display_name
+        if isinstance(self.adapter, NativeAdapter):
+            return "로컬 인덱스"
+        return getattr(self.adapter, "engine_name", "unknown")
+
+    def shutdown(self) -> None:
+        if self._spawned_everything_pid is None:
+            return
+        terminate_everything_process(self._spawned_everything_pid)
+        self._spawned_everything_pid = None
 
 
 _MANAGER: SearchManager | None = None
@@ -104,8 +170,19 @@ def get_search_manager() -> SearchManager:
     return _MANAGER
 
 
+def shutdown_search_manager() -> None:
+    global _MANAGER
+    if _MANAGER is None:
+        return
+    _MANAGER.shutdown()
+
+
 def get_engine_notices() -> list[str]:
     return get_search_manager().get_and_clear_notices()
+
+
+def get_search_availability() -> SearchAvailability:
+    return get_search_manager().get_availability()
 
 
 def search(intent: QueryIntent, limit: int = RESULT_LIMIT, refresh_index: bool = False) -> list[Match]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import time
 from pathlib import Path
 
 from core.adapters.native_adapter import (
@@ -18,10 +19,13 @@ from core.utils.everything_helper import EverythingRuntimeInfo, ensure_everythin
 
 
 EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME = 0x00000004
+DB_READY_WAIT_SECONDS = 8.0
+DB_READY_POLL_INTERVAL = 0.2
 
 
 class EverythingAdapter(SearchAdapter):
     engine_name = "everything"
+    display_name = "Everything"
 
     def __init__(self, auto_start: bool = True) -> None:
         self.runtime_info = ensure_everything_runtime(auto_start=auto_start)
@@ -62,8 +66,16 @@ class EverythingAdapter(SearchAdapter):
     def _ensure_ready(self) -> None:
         if not self.runtime_info.is_running:
             raise RuntimeError("Everything 프로세스가 실행 중이 아닙니다.")
-        if not bool(self._dll.Everything_IsDBLoaded()):
-            raise RuntimeError("Everything 데이터베이스가 아직 준비되지 않았습니다.")
+        if bool(self._dll.Everything_IsDBLoaded()):
+            return
+
+        deadline = time.monotonic() + DB_READY_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(DB_READY_POLL_INTERVAL)
+            if bool(self._dll.Everything_IsDBLoaded()):
+                return
+
+        raise RuntimeError("Everything 데이터베이스가 아직 준비되지 않았습니다.")
 
     def _build_search_expression(self, intent: QueryIntent) -> str:
         tokens: list[str] = []
