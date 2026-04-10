@@ -18,7 +18,7 @@ flowchart TD
     H2 --> K[sort_matches\n점수/시간/크기 기준 정렬]
     I2 --> K
     J2 --> K
-    K --> L[list[Match] 반환]
+    K --> L[Match 목록 반환]
     L --> M[QueryService\nResultItem 변환]
     M --> N[gui/main_window.py\nResultList.set_items]
     N --> O[결과 카드 표시]
